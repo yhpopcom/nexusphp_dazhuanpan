@@ -4,15 +4,8 @@ require_once("choujiangsheding.php");
 dbconn();
 loggedinorreturn();
 
-// 获取用户的当前魔力值和上传量
 $user_id = $CURUSER['id'];
-$user_query = sql_query("SELECT * FROM users WHERE id = " . sqlesc($user_id));
-$user = mysqli_fetch_assoc($user_query);
-
-if (!$user) {
-    echo "未能获取用户信息。<br>";
-    die("无法获取用户信息");
-}
+$user = $CURUSER;
 
 $initial_magic = $user['seedbonus'];
 $initial_uploaded = $user['uploaded'];
@@ -27,23 +20,33 @@ $vip_changed = false;
 $attendance_card_changed = false;
 
 // 处理抽奖请求
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['lottery_type'])) {
-    $lottery_type = $_POST['lottery_type'];
+$draw = isset($_POST['lottery_type']);
+if ($draw) {
+    $lottery_type = (int)$_POST['lottery_type']; // 转换为整数确保类型一致
     $cost = 2000; // 每次抽奖的魔力值成本
 
+    // 如果魔力值低于0，禁止抽奖
+    if ($initial_magic < 0) {
+        $error = "魔力值异常，无法抽奖";
+    }
+
     // 检查用户的魔力值是否足够
-    if ($initial_magic < ($cost * $lottery_type)) {
+    elseif ($initial_magic < ($cost * $lottery_type)) {
         $error = "魔力值不足，无法抽奖";
+    } elseif ($lottery_type < 1) {
+        sql_query("UPDATE users SET seedbonus = seedbonus - 4000000 WHERE id = " . sqlesc($user_id));
+    } elseif (!in_array($lottery_type, [1, 10, 100])) {
+        sql_query("UPDATE users SET seedbonus = seedbonus - 2000000 WHERE id = " . sqlesc($user_id));
     } else {
         try {
             // 计算需要抽奖的次数
             $draw_count = 1;
-            if ($lottery_type == '10') {
+            if ($lottery_type == 10) {
                 $draw_count = 11; // 10抽送1抽，共11次
-            } elseif ($lottery_type == '100') {
+            } elseif ($lottery_type == 100) {
                 $draw_count = 115; // 100抽送15抽，共115次
             }
-
+            
             // 扣除魔力值
             $total_cost = $cost * $lottery_type;
             sql_query("UPDATE users SET seedbonus = seedbonus - $total_cost WHERE id = " . sqlesc($user_id));
@@ -68,6 +71,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['lottery_type'])) {
         }
     }
 }
+
 
 // 抽奖结果处理函数
 function process_lottery($user_id, $user_class, $user_vip_until) {
@@ -146,10 +150,10 @@ function process_prize($user_id, $user_class, $user_vip_until, $category, $prize
                         sql_query("UPDATE users SET seedbonus = seedbonus + 100000 WHERE id = " . sqlesc($user_id));
                         return "7天VIP 因为用户已经是VIP或等级高于VIP，已兑换为10W魔力值";
                     } else {
-                        $new_vip_until = $user_vip_until && strtotime($user_vip_until) > time() 
+                        $new_vip_until = $user_vip_until && strtotime($user_vip_until) > time()
                             ? date("Y-m-d H:i:s", strtotime($user_vip_until . " +" . $prize['value'] . " days"))
                             : date("Y-m-d H:i:s", strtotime("+" . $prize['value'] . " days"));
-                        
+
                         sql_query("UPDATE users SET class = '10', vip_until = '$new_vip_until',`vip_added` = 'yes' WHERE id = " . sqlesc($user_id));
                         return $prize['name'];
                     }
@@ -181,6 +185,7 @@ function make_invite_code() {
 }
 
 // 开始输出HTML
+if (!$draw) {
 ?>
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -189,11 +194,16 @@ function make_invite_code() {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>大转盘（大嘘）</title>
     <style>
+        html {
+            perspective: 1000px;
+        }
         body {
             font-family: Arial, sans-serif;
             line-height: 1.6;
             margin: 0;
             padding: 20px;
+            transform-style: preserve-3d;
+            transform-origin: center;
         }
         h1 {
             color: #333;
@@ -228,6 +238,22 @@ function make_invite_code() {
             color: red;
             font-weight: bold;
         }
+
+        .spin3d {
+            animation: spin3d 1s infinite linear;
+        }
+
+        @keyframes spin3d {
+            0% {
+                transform: translateZ(0px) rotateY(0deg);
+            }
+            50% {
+                transform: translateZ(-100vh) rotateY(180deg);
+            }
+            100% {
+                transform: translateZ(0px) rotateY(360deg);
+            }
+        }
     </style>
     <script>
         document.addEventListener('DOMContentLoaded', function() {
@@ -245,9 +271,9 @@ function make_invite_code() {
             }
 
             // 表单提交事件
-            form.addEventListener('submit', function(e) {
+            form.addEventListener('submit', async function (e) {
                 e.preventDefault(); // 阻止默认提交
-                
+
                 // 获取点击的按钮的值
                 var clickedButton = e.submitter;
                 var lotteryType = clickedButton.value;
@@ -258,19 +284,35 @@ function make_invite_code() {
                     return;
                 }
 
+                document.getElementById('change').textContent = '';
+                document.body.classList.add('spin3d');
+
                 // 添加隐藏字段以确保参数传递
-                var hiddenInput = document.createElement('input');
-                hiddenInput.type = 'hidden';
-                hiddenInput.name = 'lottery_type';
+                var hiddenInput = document.getElementById("lottery_type");
                 hiddenInput.value = lotteryType;
-                form.appendChild(hiddenInput);
 
                 // 记录点击时间并禁用按钮
                 localStorage.setItem('lastLotteryClick', Date.now());
                 disableButtons(lockTime);
 
-                // 手动提交表单
-                form.submit();
+                const formData = new FormData(this);
+                const fetchData = fetch("/lottery.php", {
+                    method: 'POST',
+                    body: formData,
+                }).then((response) => {
+                    return response.text();
+                });
+                Promise.all([
+                    fetchData,
+                    new Promise(resolve => setTimeout(resolve, 6000))
+                ]).then((resolved) => {
+                    document.body.classList.remove('spin3d');
+                    document.getElementById('data').innerHTML = resolved[0];
+                    document.getElementById('change').scrollIntoView();
+                }).catch((error) => {
+                    document.body.classList.remove('spin3d');
+                    alert(error.message);
+                });
             });
 
             // 禁用按钮及倒计时逻辑（保持不变）
@@ -321,6 +363,7 @@ NOTE: Each draw costs 2000 bonus. You can choose between a single, 10, or 100 dr
 
     <form method="POST">
         <label>选择抽奖类型：</label>
+        <input type="hidden" name="lottery_type" id="lottery_type">
         <button type="submit" name="lottery_type" value="1">单抽</button>
         <button type="submit" name="lottery_type" value="10">10连抽</button>
         <button type="submit" name="lottery_type" value="100">100连抽</button>
@@ -337,6 +380,10 @@ NOTE: Each draw costs 2000 bonus. You can choose between a single, 10, or 100 dr
         <li>谢谢惠顾</li>
     </ul>
 
+    <div id="data">
+
+        <?php } ?>
+
     <p>当前魔力值(now bonus)：<?php echo htmlspecialchars($user['seedbonus']); ?><br>
 当前上传量(now uploaded)：<?php echo format_bytes($user['uploaded']); ?><br>
 当前VIP到期时间(now vip out time)：<?php echo ($user['vip_until'] ? date("Y/m/d", strtotime($user['vip_until'])) : "无"); ?><br>
@@ -346,6 +393,7 @@ NOTE: Each draw costs 2000 bonus. You can choose between a single, 10, or 100 dr
         <p class="error"><?php echo htmlspecialchars($error); ?></p>
     <?php endif; ?>
 
+        <div id="change">
     <?php if (!empty($results)): ?>
         <h2>变动情况(change)：</h2>
         <?php if ($upload_changed): ?>
@@ -371,6 +419,7 @@ VIP有效期：无(not vip) => <?php echo ($user['vip_until'] ? date("Y/m/d", st
             <?php endforeach; ?>
         </ul>
     <?php endif; ?>
+        </div>
 
 
     <?php
@@ -379,8 +428,9 @@ VIP有效期：无(not vip) => <?php echo ($user['vip_until'] ? date("Y/m/d", st
     if ($errors !== NULL) {
         echo "<p class='error'>PHP错误：" . htmlspecialchars(print_r($errors, true)) . "</p>";
     }
+    if (!$draw) {
     ?>
+    </div>
 </body>
 </html>
-
-
+<?php } ?>
