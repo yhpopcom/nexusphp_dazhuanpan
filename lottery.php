@@ -602,11 +602,15 @@ if (!$draw) {
             
             initWheel();
 
-            let lastClick = localStorage.getItem('lastLotteryClick');
+            // 使用sessionStorage替代localStorage，会话结束后自动清除
+            let lastClick = sessionStorage.getItem('lastLotteryClick');
             if (lastClick) {
                 const diff = Date.now() - lastClick;
                 if (diff < lockTime) {
                     disableButtons(lockTime - diff);
+                } else {
+                    // 如果已超过锁定时间，清除存储
+                    sessionStorage.removeItem('lastLotteryClick');
                 }
             }
 
@@ -625,7 +629,8 @@ if (!$draw) {
 
                 document.getElementById("lottery_type").value = lotteryType;
 
-                localStorage.setItem('lastLotteryClick', Date.now());
+                // 存储点击时间到sessionStorage
+                sessionStorage.setItem('lastLotteryClick', Date.now());
                 disableButtons(lockTime);
 
                 const formData = new FormData(this);
@@ -650,6 +655,9 @@ if (!$draw) {
                 }).catch(error => {
                     wheel.classList.remove('spinning');
                     alert(error.message);
+                    // 出错时清除锁定
+                    sessionStorage.removeItem('lastLotteryClick');
+                    enableButtons();
                 });
             });
 
@@ -677,7 +685,8 @@ if (!$draw) {
                     btn.disabled = false;
                     btn.innerHTML = getButtonText(btn.value);
                 });
-                localStorage.removeItem('lastLotteryClick');
+                // 冷却结束后清除存储
+                sessionStorage.removeItem('lastLotteryClick');
             }
 
             function getButtonText(value) {
@@ -767,7 +776,7 @@ if (!$draw) {
                 <div class="wheel"></div>
                 <div class="wheel-pointer"></div>
             </div>
-            
+
             <form method="POST">
                 <label>选择抽奖类型：</label>
                 <input type="hidden" name="lottery_type" id="lottery_type">
