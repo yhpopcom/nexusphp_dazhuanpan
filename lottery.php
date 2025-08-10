@@ -71,11 +71,11 @@ if ($draw) {
         $error = "魔力值不足，无法抽奖";
     } elseif ($lottery_type < 1) {
         sql_query("UPDATE users SET seedbonus = seedbonus - 4000000 WHERE id = " . sqlesc($user_id));
-    } elseif (!in_array($lottery_type, [1, 10, 50, 100])) {  // 新增50次选项
+    } elseif (!in_array($lottery_type, [1, 10, 50, 100])) {
         sql_query("UPDATE users SET seedbonus = seedbonus - 2000000 WHERE id = " . sqlesc($user_id));
     } else {
         try {
-            // 设置抽奖次数，50次额外赠送8次
+            // 设置抽奖次数
             $draw_count = 1;
             if ($lottery_type == 10) {
                 $draw_count = 11;  // 10+1
@@ -88,12 +88,17 @@ if ($draw) {
             $total_cost = $cost * $lottery_type;
             sql_query("UPDATE users SET seedbonus = seedbonus - $total_cost WHERE id = " . sqlesc($user_id));
 
+            // 关键修复：维护实时更新的VIP到期时间
+            $current_vip_until = $user['vip_until'];
+            $current_rainbow_id_until = $initial_rainbow_id_until;
+
             for ($i = 0; $i < $draw_count; $i++) {
-                $result = process_lottery(
+                // 传入当前最新的时间而非初始值
+                list($result, $current_vip_until, $current_rainbow_id_until) = process_lottery(
                     $user_id, 
                     $user['class'], 
-                    $user['vip_until'], 
-                    $initial_rainbow_id_until,
+                    $current_vip_until, 
+                    $current_rainbow_id_until,
                     $vip_stackable
                 );
                 $results[] = $result;
@@ -115,12 +120,21 @@ if ($draw) {
 }
 
 
-function process_lottery($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $vip_stackable) {
+function process_lottery($user_id, $user_class, $current_vip_until, $current_rainbow_id_until, $vip_stackable) {
     $config = include('choujiangsheding.php');
     $category = select_category($config['probabilities']);
     $prize = select_prize($config['prizes'][$category], $config['category_probabilities'][$category]);
-    $result = process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $category, $prize, $vip_stackable);
-    return $result;
+    // 处理奖励并返回更新后的时间
+    list($result, $new_vip_until, $new_rainbow_until) = process_prize(
+        $user_id, 
+        $user_class, 
+        $current_vip_until, 
+        $current_rainbow_id_until,
+        $category, 
+        $prize, 
+        $vip_stackable
+    );
+    return [$result, $new_vip_until, $new_rainbow_until];
 }
 
 function select_category($probabilities) {
@@ -149,50 +163,54 @@ function select_prize($prizes, $probabilities) {
     return end($prizes);
 }
 
-function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $category, $prize, $vip_stackable) {
+function process_prize($user_id, $user_class, $current_vip_until, $current_rainbow_id_until, $category, $prize, $vip_stackable) {
+    $new_vip_until = $current_vip_until;
+    $new_rainbow_until = $current_rainbow_id_until;
+
     switch ($category) {
         case 'upload':
             $upload_increase = $prize['value'] * 1024 * 1024 * 1024;
             sql_query("UPDATE users SET uploaded = uploaded + $upload_increase WHERE id = " . sqlesc($user_id));
-            return $prize['name'];
+            return [$prize['name'], $new_vip_until, $new_rainbow_until];
 
         case 'magic':
             $bonus_increase = $prize['value'];
             sql_query("UPDATE users SET seedbonus = seedbonus + $bonus_increase WHERE id = " . sqlesc($user_id));
-            return $prize['name'];
+            return [$prize['name'], $new_vip_until, $new_rainbow_until];
 
         case 'special':
             switch ($prize['name']) {
                 case '临时邀请':
                     $hash = make_invite_code();
                     sql_query("INSERT INTO invites (inviter, hash, time_invited, valid, expired_at) VALUES (" . sqlesc($user_id) . ", " . sqlesc($hash) . ", NOW(), 1, DATE_ADD(NOW(), INTERVAL " . $prize['value'] . " DAY))");
-                    return $prize['name'];
+                    return [$prize['name'], $new_vip_until, $new_rainbow_until];
 
                 case '补签卡':
                     sql_query("UPDATE users SET attendance_card = attendance_card + 1 WHERE id = " . sqlesc($user_id));
-                    return $prize['name'];
+                    return [$prize['name'], $new_vip_until, $new_rainbow_until];
 
                 case '7天VIP':
-                    $is_current_vip = $user_class >= 10 || (strtotime($user_vip_until) > time());
+                    $is_current_vip = $user_class >= 10 || (strtotime($current_vip_until) > time());
                     
                     if ($is_current_vip) {
                         if ($vip_stackable) {
-                            $new_vip_until = date("Y-m-d H:i:s", strtotime($user_vip_until . " +7 days"));
+                            // 基于当前最新时间叠加
+                            $new_vip_until = date("Y-m-d H:i:s", strtotime($current_vip_until . " +7 days"));
                             sql_query("UPDATE users SET vip_until = '$new_vip_until' WHERE id = " . sqlesc($user_id));
-                            return "7天VIP（时间累计）";
+                            return ["7天VIP（时间累计）", $new_vip_until, $new_rainbow_until];
                         } else {
                             sql_query("UPDATE users SET seedbonus = seedbonus + 100000 WHERE id = " . sqlesc($user_id));
-                            return "7天VIP（已转换为10W魔力值）";
+                            return ["7天VIP（已转换为10W魔力值）", $new_vip_until, $new_rainbow_until];
                         }
                     } else {
                         $new_vip_until = date("Y-m-d H:i:s", strtotime("+7 days"));
                         sql_query("UPDATE users SET class = '10', vip_until = '$new_vip_until',`vip_added` = 'yes' WHERE id = " . sqlesc($user_id));
-                        return $prize['name'];
+                        return [$prize['name'], $new_vip_until, $new_rainbow_until];
                     }
                     
                 case '彩虹ID(7天)':
                     $current_time = time();
-                    $existing_rainbow_end = $user_rainbow_id_until ? strtotime($user_rainbow_id_until) : 0;
+                    $existing_rainbow_end = $current_rainbow_id_until ? strtotime($current_rainbow_id_until) : 0;
                     
                     if ($existing_rainbow_end > $current_time) {
                         $new_rainbow_until = date("Y-m-d H:i:s", strtotime("+7 days", $existing_rainbow_end));
@@ -201,13 +219,17 @@ function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_
                     }
                     
                     update_user_meta($user_id, 'PERSONALIZED_USERNAME', $new_rainbow_until, true);
-                    return $prize['name'] . " (累计至: " . date("Y/m/d", strtotime($new_rainbow_until)) . ")";
+                    return [
+                        $prize['name'] . " (累计至: " . date("Y/m/d", strtotime($new_rainbow_until)) . ")",
+                        $new_vip_until,
+                        $new_rainbow_until
+                    ];
 
                 case '谢谢惠顾':
-                    return $prize['name'];
+                    return [$prize['name'], $new_vip_until, $new_rainbow_until];
             }
     }
-    return "未中奖";
+    return ["未中奖", $new_vip_until, $new_rainbow_until];
 }
 
 function format_bytes($bytes, $precision = 2) {
@@ -271,7 +293,6 @@ if (!$draw) {
             background: linear-gradient(135deg, var(--accent), var(--dark));
             border-radius: 12px;
             color: white;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
         }
 
         header h1 {
@@ -602,15 +623,11 @@ if (!$draw) {
             
             initWheel();
 
-            // 使用sessionStorage替代localStorage，会话结束后自动清除
-            let lastClick = sessionStorage.getItem('lastLotteryClick');
+            let lastClick = localStorage.getItem('lastLotteryClick');
             if (lastClick) {
                 const diff = Date.now() - lastClick;
                 if (diff < lockTime) {
                     disableButtons(lockTime - diff);
-                } else {
-                    // 如果已超过锁定时间，清除存储
-                    sessionStorage.removeItem('lastLotteryClick');
                 }
             }
 
@@ -629,8 +646,7 @@ if (!$draw) {
 
                 document.getElementById("lottery_type").value = lotteryType;
 
-                // 存储点击时间到sessionStorage
-                sessionStorage.setItem('lastLotteryClick', Date.now());
+                localStorage.setItem('lastLotteryClick', Date.now());
                 disableButtons(lockTime);
 
                 const formData = new FormData(this);
@@ -655,9 +671,6 @@ if (!$draw) {
                 }).catch(error => {
                     wheel.classList.remove('spinning');
                     alert(error.message);
-                    // 出错时清除锁定
-                    sessionStorage.removeItem('lastLotteryClick');
-                    enableButtons();
                 });
             });
 
@@ -685,8 +698,7 @@ if (!$draw) {
                     btn.disabled = false;
                     btn.innerHTML = getButtonText(btn.value);
                 });
-                // 冷却结束后清除存储
-                sessionStorage.removeItem('lastLotteryClick');
+                localStorage.removeItem('lastLotteryClick');
             }
 
             function getButtonText(value) {
@@ -776,14 +788,14 @@ if (!$draw) {
                 <div class="wheel"></div>
                 <div class="wheel-pointer"></div>
             </div>
-
+            
             <form method="POST">
                 <label>选择抽奖类型：</label>
                 <input type="hidden" name="lottery_type" id="lottery_type">
                 <div class="btn-group">
                     <button type="submit" name="lottery_type" value="1" class="lottery-btn">单抽 (2000魔力)</button>
                     <button type="submit" name="lottery_type" value="10" class="lottery-btn">10连抽 (送1抽)</button>
-                    <button type="submit" name="lottery_type" value="50" class="lottery-btn">50连抽 (送8抽)</button>  <!-- 新增50次按钮 -->
+                    <button type="submit" name="lottery_type" value="50" class="lottery-btn">50连抽 (送8抽)</button>
                     <button type="submit" name="lottery_type" value="100" class="lottery-btn">100连抽 (送15抽)</button>
                 </div>
             </form>
@@ -843,7 +855,8 @@ if (!$draw) {
                         <?php if ($upload_changed): ?>
                             <p>上传量(uploaded)：<span class="change-highlight"><?php echo format_bytes($initial_uploaded); ?></span> => <span class="change-highlight"><?php echo format_bytes($user['uploaded']); ?></span></p>
                         <?php endif; ?>
-                        <?php if ($magic_changed): ?>
+                        <?php
+                        if ($magic_changed): ?>
                             <p>魔力值(bonus)：<span class="change-highlight"><?php echo number_format($initial_magic, 1); ?></span> => <span class="change-highlight"><?php echo number_format($user['seedbonus'], 1); ?></span></p>
                         <?php endif; ?>
                         <?php if ($vip_changed): ?>
@@ -856,7 +869,8 @@ if (!$draw) {
                         <?php if ($attendance_card_changed): ?>
                             <p>补签卡(attendance card)：<span class="change-highlight"><?php echo $initial_attendance_card; ?></span> => <span class="change-highlight"><?php echo $user['attendance_card']; ?></span></p>
                         <?php endif; ?>
-                        <?php if ($rainbow_id_changed): ?>
+                        <?php
+                        if ($rainbow_id_changed): ?>
                             <?php 
                                 $initial_rainbow_end = $initial_rainbow_id_until ? strtotime($initial_rainbow_id_until) : 0;
                                 $new_rainbow_end = get_user_meta_deadline($user_id, 'PERSONALIZED_USERNAME') ? strtotime(get_user_meta_deadline($user_id, 'PERSONALIZED_USERNAME')) : 0;
