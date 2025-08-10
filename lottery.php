@@ -8,7 +8,7 @@ $user_id = $CURUSER['id'];
 $user = $CURUSER;
 
 // VIP7天时间累计开关（true=开启累计时间，false=关闭累计转换为魔力）
-$vip_stackable = true;  // 可在此处切换开关状态
+$vip_stackable = true;
 
 // 从user_metas表获取数据的函数
 function get_user_meta_deadline($uid, $meta_key) {
@@ -88,20 +88,44 @@ if ($draw) {
             $total_cost = $cost * $lottery_type;
             sql_query("UPDATE users SET seedbonus = seedbonus - $total_cost WHERE id = " . sqlesc($user_id));
 
-            // 关键修复：维护实时更新的VIP到期时间
+            // 关键修复：初始化当前VIP时间，循环中实时更新
             $current_vip_until = $user['vip_until'];
-            $current_rainbow_id_until = $initial_rainbow_id_until;
+            $current_rainbow_until = $initial_rainbow_id_until;
 
             for ($i = 0; $i < $draw_count; $i++) {
-                // 传入当前最新的时间而非初始值
-                list($result, $current_vip_until, $current_rainbow_id_until) = process_lottery(
+                // 传入当前最新的VIP和彩虹ID时间
+                $result = process_lottery(
                     $user_id, 
                     $user['class'], 
                     $current_vip_until, 
-                    $current_rainbow_id_until,
+                    $current_rainbow_until,
                     $vip_stackable
                 );
-                $results[] = $result;
+                $results[] = $result['text'];
+                // 更新当前VIP和彩虹ID时间为本次抽奖后的最新值
+                $current_vip_until = $result['updated_vip_until'];
+                $current_rainbow_until = $result['updated_rainbow_until'];
+            }
+
+            // 汇总抽奖结果并发送消息
+            if (!empty($results)) {
+                $msg_content = "您的抽奖结果如下：\n" . implode("\n", $results);
+                $subject = "幸运大转盘抽奖结果";
+                sql_query("INSERT INTO messages (
+                    sender, 
+                    receiver, 
+                    subject, 
+                    msg, 
+                    added, 
+                    unread
+                ) VALUES (
+                    0, 
+                    " . sqlesc($user_id) . ", 
+                    " . sqlesc($subject) . ", 
+                    " . sqlesc($msg_content) . ", 
+                    NOW(), 
+                    'yes'
+                )");
             }
 
             $user_query = sql_query("SELECT * FROM users WHERE id = " . sqlesc($user_id));
@@ -120,21 +144,12 @@ if ($draw) {
 }
 
 
-function process_lottery($user_id, $user_class, $current_vip_until, $current_rainbow_id_until, $vip_stackable) {
+function process_lottery($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $vip_stackable) {
     $config = include('choujiangsheding.php');
     $category = select_category($config['probabilities']);
     $prize = select_prize($config['prizes'][$category], $config['category_probabilities'][$category]);
-    // 处理奖励并返回更新后的时间
-    list($result, $new_vip_until, $new_rainbow_until) = process_prize(
-        $user_id, 
-        $user_class, 
-        $current_vip_until, 
-        $current_rainbow_id_until,
-        $category, 
-        $prize, 
-        $vip_stackable
-    );
-    return [$result, $new_vip_until, $new_rainbow_until];
+    $result = process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $category, $prize, $vip_stackable);
+    return $result;
 }
 
 function select_category($probabilities) {
@@ -163,54 +178,65 @@ function select_prize($prizes, $probabilities) {
     return end($prizes);
 }
 
-function process_prize($user_id, $user_class, $current_vip_until, $current_rainbow_id_until, $category, $prize, $vip_stackable) {
-    $new_vip_until = $current_vip_until;
-    $new_rainbow_until = $current_rainbow_id_until;
+function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $category, $prize, $vip_stackable) {
+    // 初始化返回数据，包含结果文本和更新后的时间
+    $return_data = [
+        'text' => "未中奖",
+        'updated_vip_until' => $user_vip_until,
+        'updated_rainbow_until' => $user_rainbow_id_until
+    ];
 
     switch ($category) {
         case 'upload':
             $upload_increase = $prize['value'] * 1024 * 1024 * 1024;
             sql_query("UPDATE users SET uploaded = uploaded + $upload_increase WHERE id = " . sqlesc($user_id));
-            return [$prize['name'], $new_vip_until, $new_rainbow_until];
+            $return_data['text'] = $prize['name'];
+            return $return_data;
 
         case 'magic':
             $bonus_increase = $prize['value'];
             sql_query("UPDATE users SET seedbonus = seedbonus + $bonus_increase WHERE id = " . sqlesc($user_id));
-            return [$prize['name'], $new_vip_until, $new_rainbow_until];
+            $return_data['text'] = $prize['name'];
+            return $return_data;
 
         case 'special':
             switch ($prize['name']) {
                 case '临时邀请':
                     $hash = make_invite_code();
                     sql_query("INSERT INTO invites (inviter, hash, time_invited, valid, expired_at) VALUES (" . sqlesc($user_id) . ", " . sqlesc($hash) . ", NOW(), 1, DATE_ADD(NOW(), INTERVAL " . $prize['value'] . " DAY))");
-                    return [$prize['name'], $new_vip_until, $new_rainbow_until];
+                    $return_data['text'] = $prize['name'];
+                    return $return_data;
 
                 case '补签卡':
                     sql_query("UPDATE users SET attendance_card = attendance_card + 1 WHERE id = " . sqlesc($user_id));
-                    return [$prize['name'], $new_vip_until, $new_rainbow_until];
+                    $return_data['text'] = $prize['name'];
+                    return $return_data;
 
                 case '7天VIP':
-                    $is_current_vip = $user_class >= 10 || (strtotime($current_vip_until) > time());
+                    $is_current_vip = $user_class >= 10 || (strtotime($user_vip_until) > time());
                     
                     if ($is_current_vip) {
                         if ($vip_stackable) {
-                            // 基于当前最新时间叠加
-                            $new_vip_until = date("Y-m-d H:i:s", strtotime($current_vip_until . " +7 days"));
+                            $new_vip_until = date("Y-m-d H:i:s", strtotime($user_vip_until . " +7 days"));
                             sql_query("UPDATE users SET vip_until = '$new_vip_until' WHERE id = " . sqlesc($user_id));
-                            return ["7天VIP（时间累计）", $new_vip_until, $new_rainbow_until];
+                            $return_data['text'] = "7天VIP（时间累计）";
+                            $return_data['updated_vip_until'] = $new_vip_until; // 更新VIP时间
                         } else {
                             sql_query("UPDATE users SET seedbonus = seedbonus + 100000 WHERE id = " . sqlesc($user_id));
-                            return ["7天VIP（已转换为10W魔力值）", $new_vip_until, $new_rainbow_until];
+                            $return_data['text'] = "7天VIP（已转换为10W魔力值）";
                         }
                     } else {
                         $new_vip_until = date("Y-m-d H:i:s", strtotime("+7 days"));
                         sql_query("UPDATE users SET class = '10', vip_until = '$new_vip_until',`vip_added` = 'yes' WHERE id = " . sqlesc($user_id));
-                        return [$prize['name'], $new_vip_until, $new_rainbow_until];
+                        $return_data['text'] = $prize['name'];
+                        $return_data['updated_vip_until'] = $new_vip_until; // 更新VIP时间
                     }
+                    return $return_data;
                     
-                case '彩虹ID(7天)':
+                case '彩虹id':
+                case '彩虹ID(7天)': // 兼容两种写法
                     $current_time = time();
-                    $existing_rainbow_end = $current_rainbow_id_until ? strtotime($current_rainbow_id_until) : 0;
+                    $existing_rainbow_end = $user_rainbow_id_until !== null ? strtotime($user_rainbow_id_until) : 0;
                     
                     if ($existing_rainbow_end > $current_time) {
                         $new_rainbow_until = date("Y-m-d H:i:s", strtotime("+7 days", $existing_rainbow_end));
@@ -219,17 +245,16 @@ function process_prize($user_id, $user_class, $current_vip_until, $current_rainb
                     }
                     
                     update_user_meta($user_id, 'PERSONALIZED_USERNAME', $new_rainbow_until, true);
-                    return [
-                        $prize['name'] . " (累计至: " . date("Y/m/d", strtotime($new_rainbow_until)) . ")",
-                        $new_vip_until,
-                        $new_rainbow_until
-                    ];
+                    $return_data['text'] = $prize['name'] . " (累计至: " . date("Y/m/d", strtotime($new_rainbow_until)) . ")";
+                    $return_data['updated_rainbow_until'] = $new_rainbow_until; // 更新彩虹ID时间
+                    return $return_data;
 
                 case '谢谢惠顾':
-                    return [$prize['name'], $new_vip_until, $new_rainbow_until];
+                    $return_data['text'] = $prize['name'];
+                    return $return_data;
             }
     }
-    return ["未中奖", $new_vip_until, $new_rainbow_until];
+    return $return_data;
 }
 
 function format_bytes($bytes, $precision = 2) {
@@ -705,7 +730,7 @@ if (!$draw) {
                 switch(value) {
                     case '1': return '单抽 (2000魔力)';
                     case '10': return '10连抽 (送1抽)';
-                    case '50': return '50连抽 (送8抽)';  // 新增50次按钮文本
+                    case '50': return '50连抽 (送8抽)';
                     case '100': return '100连抽 (送15抽)';
                     default: return '抽奖';
                 }
@@ -788,7 +813,7 @@ if (!$draw) {
                 <div class="wheel"></div>
                 <div class="wheel-pointer"></div>
             </div>
-            
+
             <form method="POST">
                 <label>选择抽奖类型：</label>
                 <input type="hidden" name="lottery_type" id="lottery_type">
@@ -829,7 +854,7 @@ if (!$draw) {
 
         <div class="user-info">
             <h2>我的状态</h2>
-            <p>当前魔力值(now bonus)：<?php echo htmlspecialchars($user['seedbonus']); ?></p>
+            <p>当前魔力值(now bonus)：<?php echo htmlspecialchars($user['seedbonus']); ?>
             <p>当前上传量(now uploaded)：<?php echo format_bytes($user['uploaded']); ?></p>
             <p>当前VIP到期时间(now vip out time)：<?php echo ($user['vip_until'] ? date("Y/m/d", strtotime($user['vip_until'])) : "无"); ?></p>
             <p>当前补签卡数量(now attendance card)：<?php echo htmlspecialchars($user['attendance_card']); ?></p>
