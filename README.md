@@ -1,7 +1,7 @@
 # nexusphp_dazhuanpan
 你就说转没转吧
 # 进行一定美化
-！[图片展示](/pic/becc4c3fb31c86aaa3df5c0bba8a09ac.png)
+![image](https://github.com/yhpopcom/nexusphp_dazhuanpan/blob/main/pic/becc4c3fb31c86aaa3df5c0bba8a09ac.png)
 
 # 概率设定
 修改 `choujiangsheding.php` 文件，请保证区块中的值加起来为1
