@@ -46,6 +46,19 @@ function update_user_meta($uid, $meta_key, $new_deadline, $is_rainbow = false) {
     }
 }
 
+// 记录抽奖日志到TXT文件
+function log_lottery($user_id, $username, $prize_name) {
+    // 日志文件路径（确保目录有写入权限）
+    $log_file = 'lottery_logs.log';
+    
+    // 日志内容：时间|用户ID|用户名|奖品名称
+    $log_time = date('Y-m-d H:i:s');
+    $log_content = "{$log_time}|{$user_id}|{$username}|{$prize_name}\n";
+    
+    // 写入日志（追加模式）
+    file_put_contents($log_file, $log_content, FILE_APPEND | LOCK_EX);
+}
+
 $initial_magic = $user['seedbonus'];
 $initial_uploaded = $user['uploaded'];
 $initial_vip_until = $user['vip_until'];
@@ -88,6 +101,11 @@ if ($draw) {
             $total_cost = $cost * $lottery_type;
             sql_query("UPDATE users SET seedbonus = seedbonus - $total_cost WHERE id = " . sqlesc($user_id));
 
+            // 获取用户名用于日志记录
+            $user_res = sql_query("SELECT username FROM users WHERE id = " . sqlesc($user_id));
+            $user_data = mysqli_fetch_assoc($user_res);
+            $username = $user_data['username'] ?? '未知用户';
+
             // 关键修复：初始化当前VIP时间，循环中实时更新
             $current_vip_until = $user['vip_until'];
             $current_rainbow_until = $initial_rainbow_id_until;
@@ -99,7 +117,8 @@ if ($draw) {
                     $user['class'], 
                     $current_vip_until, 
                     $current_rainbow_until,
-                    $vip_stackable
+                    $vip_stackable,
+                    $username
                 );
                 $results[] = $result['text'];
                 // 更新当前VIP和彩虹ID时间为本次抽奖后的最新值
@@ -144,11 +163,11 @@ if ($draw) {
 }
 
 
-function process_lottery($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $vip_stackable) {
+function process_lottery($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $vip_stackable, $username) {
     $config = include('choujiangsheding.php');
     $category = select_category($config['probabilities']);
     $prize = select_prize($config['prizes'][$category], $config['category_probabilities'][$category]);
-    $result = process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $category, $prize, $vip_stackable);
+    $result = process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $category, $prize, $vip_stackable, $username);
     return $result;
 }
 
@@ -178,7 +197,7 @@ function select_prize($prizes, $probabilities) {
     return end($prizes);
 }
 
-function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $category, $prize, $vip_stackable) {
+function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_until, $category, $prize, $vip_stackable, $username) {
     // 初始化返回数据，包含结果文本和更新后的时间
     $return_data = [
         'text' => "未中奖",
@@ -191,12 +210,16 @@ function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_
             $upload_increase = $prize['value'] * 1024 * 1024 * 1024;
             sql_query("UPDATE users SET uploaded = uploaded + $upload_increase WHERE id = " . sqlesc($user_id));
             $return_data['text'] = $prize['name'];
+            // 记录日志
+            log_lottery($user_id, $username, $prize['name']);
             return $return_data;
 
         case 'magic':
             $bonus_increase = $prize['value'];
             sql_query("UPDATE users SET seedbonus = seedbonus + $bonus_increase WHERE id = " . sqlesc($user_id));
             $return_data['text'] = $prize['name'];
+            // 记录日志
+            log_lottery($user_id, $username, $prize['name']);
             return $return_data;
 
         case 'special':
@@ -205,11 +228,15 @@ function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_
                     $hash = make_invite_code();
                     sql_query("INSERT INTO invites (inviter, hash, time_invited, valid, expired_at) VALUES (" . sqlesc($user_id) . ", " . sqlesc($hash) . ", NOW(), 1, DATE_ADD(NOW(), INTERVAL " . $prize['value'] . " DAY))");
                     $return_data['text'] = $prize['name'];
+                    // 记录日志
+                    log_lottery($user_id, $username, $prize['name']);
                     return $return_data;
 
                 case '补签卡':
                     sql_query("UPDATE users SET attendance_card = attendance_card + 1 WHERE id = " . sqlesc($user_id));
                     $return_data['text'] = $prize['name'];
+                    // 记录日志
+                    log_lottery($user_id, $username, $prize['name']);
                     return $return_data;
 
                 case '7天VIP':
@@ -231,6 +258,8 @@ function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_
                         $return_data['text'] = $prize['name'];
                         $return_data['updated_vip_until'] = $new_vip_until; // 更新VIP时间
                     }
+                    // 记录日志
+                    log_lottery($user_id, $username, $return_data['text']);
                     return $return_data;
                     
                 case '彩虹id':
@@ -247,10 +276,14 @@ function process_prize($user_id, $user_class, $user_vip_until, $user_rainbow_id_
                     update_user_meta($user_id, 'PERSONALIZED_USERNAME', $new_rainbow_until, true);
                     $return_data['text'] = $prize['name'] . " (累计至: " . date("Y/m/d", strtotime($new_rainbow_until)) . ")";
                     $return_data['updated_rainbow_until'] = $new_rainbow_until; // 更新彩虹ID时间
+                    // 记录日志
+                    log_lottery($user_id, $username, $prize['name']);
                     return $return_data;
 
                 case '谢谢惠顾':
                     $return_data['text'] = $prize['name'];
+                    // 记录日志
+                    log_lottery($user_id, $username, $prize['name']);
                     return $return_data;
             }
     }
@@ -799,7 +832,7 @@ if (!$draw) {
         <div class="intro">
             <p>说明：每次转动大转盘需要消耗2000魔力值。您可以选择单次、10次、50次或100次抽奖。<br>
             10次抽奖额外获得1次抽奖机会，50次额外获得8次，100次抽奖额外获得15次抽奖机会。<br>
-            所有时效类道具（包括彩虹ID）均可累计叠加时间！</p>
+            （VIP和彩虹ID）均可累计叠加时间！</p>
             
             <div class="gif-container">
                 <img src="pic/dazhuanpan_1.gif" alt="转盘动画1">
@@ -854,7 +887,7 @@ if (!$draw) {
 
         <div class="user-info">
             <h2>我的状态</h2>
-            <p>当前魔力值(now bonus)：<?php echo htmlspecialchars($user['seedbonus']); ?>
+            <p>当前魔力值(now bonus)：<?php echo htmlspecialchars($user['seedbonus']); ?></p>
             <p>当前上传量(now uploaded)：<?php echo format_bytes($user['uploaded']); ?></p>
             <p>当前VIP到期时间(now vip out time)：<?php echo ($user['vip_until'] ? date("Y/m/d", strtotime($user['vip_until'])) : "无"); ?></p>
             <p>当前补签卡数量(now attendance card)：<?php echo htmlspecialchars($user['attendance_card']); ?></p>
